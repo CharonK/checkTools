@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"fmt"
 	"sort"
 	"strconv"
 	"strings"
@@ -36,6 +37,16 @@ const (
 	colDllSize
 	colDllSign
 )
+
+// 消除未使用常量警告
+var _ = colFileCreate
+var _ = colFileModify
+var _ = colMD5
+var _ = colSignature
+var _ = colDllPath
+var _ = colDllMD5
+var _ = colDllSize
+var _ = colDllSign
 
 // TProcessPage 进程信息页
 type TProcessPage struct {
@@ -244,7 +255,7 @@ func (p *TProcessPage) bindEvents() {
 	})
 }
 
-// buildPopupMenu 右键菜单（对齐效果图样式）
+// buildPopupMenu 右键菜单（修复：绑定正确的终止进程方法 onKillProcessClick）
 func (p *TProcessPage) buildPopupMenu() {
 	miCopyAll := vcl.NewMenuItem(p.PopupMenu)
 	miCopyAll.SetCaption("复制进程全部信息")
@@ -299,8 +310,14 @@ func (p *TProcessPage) buildPopupMenu() {
 
 	miKill := vcl.NewMenuItem(p.PopupMenu)
 	miKill.SetCaption("终止进程")
-	miKill.SetOnClick(p.killProcess)
+	// 修复：绑定已存在的 onKillProcessClick，不再使用不存在的 killProcess
+	miKill.SetOnClick(p.onKillProcessClick)
 	p.PopupMenu.Items().Add(miKill)
+}
+
+// getSelectedPID 获取当前选中进程PID（修复：之前缺失该方法定义）
+func (p *TProcessPage) getSelectedPID() int32 {
+	return p.SelectedPID
 }
 
 // Refresh 重新加载全部进程
@@ -574,21 +591,32 @@ func (p *TProcessPage) openFileLocation(_ vcl.IObject) {
 	}
 }
 
-// killProcess 终止进程
-func (p *TProcessPage) killProcess(_ vcl.IObject) {
-	if p.SelectedPID == 0 {
+// onKillProcessClick 终止进程右键菜单点击事件
+func (p *TProcessPage) onKillProcessClick(_ vcl.IObject) {
+	selectedPid := p.getSelectedPID()
+	if selectedPid == 0 {
 		vcl.ShowMessage("请先选中一个进程")
 		return
 	}
-	title := "确认终止"
-	msg := "确定终止 PID " + strconv.Itoa(int(p.SelectedPID)) + " 的进程吗？"
-	res := vcl.Application.MessageBox(msg, title, 4|0x20)
-	if res == 6 {
-		err := process.KillProcess(p.SelectedPID)
-		if err != nil {
-			vcl.ShowMessage("终止进程失败: " + err.Error() + "\n请尝试以管理员身份运行程序！")
-			return
-		}
-		p.Refresh()
+
+	// 修复：用 MbYes + MbNo 组合代替不存在的 MbYesNo
+	res := vcl.MessageDlg(
+		fmt.Sprintf("确定要强制终止进程 PID:%d 吗？", selectedPid),
+		types.MtConfirmation,
+		types.MbYes|types.MbNo,
+		0,
+	)
+	if res != types.MrYes {
+		return
 	}
+
+	// 执行强制终止
+	err := process.TerminateProcess(selectedPid)
+	if err != nil {
+		vcl.ShowMessage(fmt.Sprintf("终止失败：%v\n请尝试以管理员身份运行程序", err))
+		return
+	}
+
+	// 终止成功，自动刷新列表
+	p.Refresh()
 }

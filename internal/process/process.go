@@ -9,6 +9,7 @@ import (
 	"os"
 
 	"github.com/shirou/gopsutil/v3/process"
+	"golang.org/x/sys/windows"
 )
 
 // ProcessInfo 进程信息结构体
@@ -21,6 +22,19 @@ type ProcessInfo struct {
 	User       string
 	Memory     uint64
 	CreateTime int64 // 毫秒级时间戳
+}
+
+// TerminateProcess 强制终止指定PID的进程
+func TerminateProcess(pid int32) error {
+	// 申请终止权限打开进程句柄
+	handle, err := windows.OpenProcess(windows.PROCESS_TERMINATE, false, uint32(pid))
+	if err != nil {
+		return err
+	}
+	defer windows.CloseHandle(handle)
+
+	// 强制终止进程，退出码为0
+	return windows.TerminateProcess(handle, 0)
 }
 
 // GetAllProcesses 获取全量有效进程列表（自动过滤无名称的无效进程）
