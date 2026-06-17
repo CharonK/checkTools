@@ -1,0 +1,24 @@
+# Go 编译产物
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+
+# Go 工作区
+go.work
+go.work.sum
+
+# GoLand / IDEA 配置目录
+.idea/
+*.iml
+
+# Windows 系统临时文件
+Thumbs.db
+*.tmp
+*.log
+
+# 可选：如果不想提交yara规则文件（体积较大），取消下面注释
+# rules/
