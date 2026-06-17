@@ -93,11 +93,11 @@ func (f *TMainForm) OnFormCreate(sender vcl.IObject) {
 	f.TabYaraScan.SetCaption("进程扫描")
 	NewYaraScanPage(f.TabYaraScan)
 
-	// 3. Beacon扫描页
-	f.TabBeacon = vcl.NewTabSheet(f)
-	f.TabBeacon.SetParent(f.PageControl)
-	f.TabBeacon.SetCaption("Beacon扫描")
-	NewBeaconPage(f.TabBeacon)
+	// 3. 外连分析页
+	f.TabNetwork = vcl.NewTabSheet(f)
+	f.TabNetwork.SetParent(f.PageControl)
+	f.TabNetwork.SetCaption("外连分析")
+	NewNetworkPage(f.TabNetwork)
 
 	// 4. 主机信息页
 	f.TabHost = vcl.NewTabSheet(f)
@@ -111,11 +111,11 @@ func (f *TMainForm) OnFormCreate(sender vcl.IObject) {
 	f.TabLog.SetCaption("日志分析")
 	NewLogPage(f.TabLog)
 
-	// 6. 外连分析页
-	f.TabNetwork = vcl.NewTabSheet(f)
-	f.TabNetwork.SetParent(f.PageControl)
-	f.TabNetwork.SetCaption("外连分析")
-	NewNetworkPage(f.TabNetwork)
+	// 6. Beacon扫描页
+	f.TabBeacon = vcl.NewTabSheet(f)
+	f.TabBeacon.SetParent(f.PageControl)
+	f.TabBeacon.SetCaption("Beacon扫描")
+	NewBeaconPage(f.TabBeacon)
 
 	// 7. 活动痕迹页
 	f.TabTrace = vcl.NewTabSheet(f)
