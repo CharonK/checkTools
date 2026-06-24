@@ -7,6 +7,7 @@ require (
 	github.com/shirou/gopsutil/v3 v3.24.5
 	github.com/ying32/govcl v2.2.3+incompatible
 	golang.org/x/sys v0.46.0
+	golang.org/x/text v0.38.0
 )
 
 require (

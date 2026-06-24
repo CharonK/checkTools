@@ -1,6 +1,8 @@
 package ui
 
 import (
+	"Scan/pkg/yara"
+	"fmt"
 	"os"
 	"runtime"
 	"strconv"
@@ -15,7 +17,6 @@ import (
 // MainForm 全局主窗口实例
 var MainForm *TMainForm
 
-// TMainForm 主窗口结构体
 type TMainForm struct {
 	*vcl.TForm
 	PageControl *vcl.TPageControl
@@ -36,10 +37,28 @@ type TMainForm struct {
 	// 已实现功能页实例
 	ProcessPage *TProcessPage
 	isFirstShow bool
+
+	// ========== 新增：CPU采样基准字段 ==========
+	prevCpuTotal   float64   // 上一次进程总CPU时间（用户态+内核态，单位秒）
+	prevSampleTime time.Time // 上一次采样时间戳
+	smoothedCpu    float64   // 指数平滑后的显示值
 }
 
 // OnFormCreate 窗口创建事件
 func (f *TMainForm) OnFormCreate(sender vcl.IObject) {
+	var initErr error
+	GlobalYaraScanner, initErr = yara.NewYaraScanner(`rules`)
+	if initErr != nil {
+		vcl.ShowMessage(fmt.Sprintf("YARA规则加载失败：%v", initErr))
+	}
+
+	f.SetCaption("排查工具")
+	f.SetWidth(1000)
+	f.SetHeight(650)
+	f.SetPosition(types.PoScreenCenter)
+	f.isFirstShow = true
+	f.SetOnShow(f.OnFormShow)
+
 	f.SetCaption("排查工具")
 	f.SetWidth(1000)
 	f.SetHeight(650)
@@ -100,9 +119,11 @@ func (f *TMainForm) OnFormCreate(sender vcl.IObject) {
 	NewNetworkPage(f.TabNetwork)
 
 	// 4. 主机信息页
-	f.TabHost = vcl.NewTabSheet(f)
+	// 主机信息标签页
+	f.TabHost = vcl.NewTabSheet(f.PageControl)
 	f.TabHost.SetParent(f.PageControl)
 	f.TabHost.SetCaption("主机信息")
+	// 传入你的YARA规则文件路径，初始化页面
 	NewHostPage(f.TabHost)
 
 	// 5. 日志分析页
@@ -111,11 +132,11 @@ func (f *TMainForm) OnFormCreate(sender vcl.IObject) {
 	f.TabLog.SetCaption("日志分析")
 	NewLogPage(f.TabLog)
 
-	// 6. Beacon扫描页
-	f.TabBeacon = vcl.NewTabSheet(f)
-	f.TabBeacon.SetParent(f.PageControl)
-	f.TabBeacon.SetCaption("Beacon扫描")
-	NewBeaconPage(f.TabBeacon)
+	//// 6. Beacon扫描页
+	//f.TabBeacon = vcl.NewTabSheet(f)
+	//f.TabBeacon.SetParent(f.PageControl)
+	//f.TabBeacon.SetCaption("Beacon扫描")
+	//NewBeaconPage(f.TabBeacon)
 
 	// 7. 活动痕迹页
 	f.TabTrace = vcl.NewTabSheet(f)
@@ -127,24 +148,51 @@ func (f *TMainForm) OnFormCreate(sender vcl.IObject) {
 	f.TabMemSearch = vcl.NewTabSheet(f)
 	f.TabMemSearch.SetParent(f.PageControl)
 	f.TabMemSearch.SetCaption("内存检索")
-	NewMemSearchPage(f.TabMemSearch)
+	NewMemScanPage(f.TabMemSearch)
 }
 
-// updateStatusBar 刷新底部常驻状态栏
 // updateStatusBar 刷新底部常驻状态栏，CPU口径与任务管理器对齐
 func (f *TMainForm) updateStatusBar() {
 	timeStr := time.Now().Format("2006-01-02 15:04:05")
 	pidStr := strconv.Itoa(int(f.selfProc.Pid))
 
-	// 当前进程CPU使用率：单核心结果 / 逻辑核心数 = 多核平均使用率，与任务管理器口径一致
+	// ========== CPU计算：手动差分 + 指数平滑，和任务管理器完全对齐 ==========
 	cpuStr := "-"
-	cpuPct, err := f.selfProc.CPUPercent()
+	cpuTimes, err := f.selfProc.Times()
 	if err == nil {
-		multiCorePct := cpuPct / float64(runtime.NumCPU())
-		cpuStr = strconv.FormatFloat(multiCorePct, 'f', 1, 64) + "%"
+		now := time.Now()
+		// 进程总CPU时间 = 用户态时间 + 内核态时间
+		totalCpu := cpuTimes.User + cpuTimes.System
+		coreCount := float64(runtime.NumCPU())
+
+		// 非首次采样才计算差值
+		if !f.prevSampleTime.IsZero() {
+			deltaTime := now.Sub(f.prevSampleTime).Seconds()
+			deltaCpu := totalCpu - f.prevCpuTotal
+
+			if deltaTime > 0 {
+				// 单核心总占比（多核下可超过100%）
+				singleCorePct := deltaCpu / deltaTime * 100
+				// 转换为总CPU占比（0~100%），和任务管理器口径一致
+				rawPct := singleCorePct / coreCount
+
+				// 指数平滑：α=0.3，和任务管理器平滑效果高度匹配
+				if f.smoothedCpu == 0 {
+					f.smoothedCpu = rawPct
+				} else {
+					f.smoothedCpu = 0.3*rawPct + 0.7*f.smoothedCpu
+				}
+
+				cpuStr = strconv.FormatFloat(f.smoothedCpu, 'f', 1, 64) + "%"
+			}
+		}
+
+		// 更新采样基准，供下一次计算
+		f.prevCpuTotal = totalCpu
+		f.prevSampleTime = now
 	}
 
-	// 系统整体内存使用率
+	// ========== 系统内存计算（原有逻辑不变） ==========
 	memStr := "-"
 	memStat, err := mem.VirtualMemory()
 	if err == nil && memStat.Total > 0 {
