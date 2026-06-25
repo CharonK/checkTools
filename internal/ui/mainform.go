@@ -1,10 +1,10 @@
 package ui
 
 import (
+	"Scan/pkg/winapi"
 	"Scan/pkg/yara"
 	"fmt"
 	"os"
-	"runtime"
 	"strconv"
 	"time"
 
@@ -19,10 +19,11 @@ var MainForm *TMainForm
 
 type TMainForm struct {
 	*vcl.TForm
-	PageControl *vcl.TPageControl
-	StatusBar   *vcl.TStatusBar
-	ProgressBar *vcl.TProgressBar
-	selfProc    *gopsProcess.Process
+	MainPageCtrl *vcl.TPageControl
+	PageControl  *vcl.TPageControl
+	StatusBar    *vcl.TStatusBar
+	ProgressBar  *vcl.TProgressBar
+	selfProc     *gopsProcess.Process
 
 	// 8个功能标签页
 	TabProcess   *vcl.TTabSheet
@@ -42,6 +43,7 @@ type TMainForm struct {
 	prevCpuTotal   float64   // 上一次进程总CPU时间（用户态+内核态，单位秒）
 	prevSampleTime time.Time // 上一次采样时间戳
 	smoothedCpu    float64   // 指数平滑后的显示值
+	StatusTimer    *vcl.TTimer
 }
 
 // OnFormCreate 窗口创建事件
@@ -156,43 +158,11 @@ func (f *TMainForm) updateStatusBar() {
 	timeStr := time.Now().Format("2006-01-02 15:04:05")
 	pidStr := strconv.Itoa(int(f.selfProc.Pid))
 
-	// ========== CPU计算：手动差分 + 指数平滑，和任务管理器完全对齐 ==========
-	cpuStr := "-"
-	cpuTimes, err := f.selfProc.Times()
-	if err == nil {
-		now := time.Now()
-		// 进程总CPU时间 = 用户态时间 + 内核态时间
-		totalCpu := cpuTimes.User + cpuTimes.System
-		coreCount := float64(runtime.NumCPU())
+	// ========== CPU计算：系统全局占用，和任务管理器完全对齐 ==========
+	cpuUsage := winapi.GetSystemCPUUsage()
+	cpuStr := strconv.FormatFloat(cpuUsage, 'f', 1, 64) + "%"
 
-		// 非首次采样才计算差值
-		if !f.prevSampleTime.IsZero() {
-			deltaTime := now.Sub(f.prevSampleTime).Seconds()
-			deltaCpu := totalCpu - f.prevCpuTotal
-
-			if deltaTime > 0 {
-				// 单核心总占比（多核下可超过100%）
-				singleCorePct := deltaCpu / deltaTime * 100
-				// 转换为总CPU占比（0~100%），和任务管理器口径一致
-				rawPct := singleCorePct / coreCount
-
-				// 指数平滑：α=0.3，和任务管理器平滑效果高度匹配
-				if f.smoothedCpu == 0 {
-					f.smoothedCpu = rawPct
-				} else {
-					f.smoothedCpu = 0.3*rawPct + 0.7*f.smoothedCpu
-				}
-
-				cpuStr = strconv.FormatFloat(f.smoothedCpu, 'f', 1, 64) + "%"
-			}
-		}
-
-		// 更新采样基准，供下一次计算
-		f.prevCpuTotal = totalCpu
-		f.prevSampleTime = now
-	}
-
-	// ========== 系统内存计算（原有逻辑不变） ==========
+	// ========== 系统内存计算（原有逻辑完全不变） ==========
 	memStr := "-"
 	memStat, err := mem.VirtualMemory()
 	if err == nil && memStat.Total > 0 {

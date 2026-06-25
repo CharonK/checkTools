@@ -5,6 +5,7 @@ package memscan
 import (
 	"context"
 	"encoding/binary"
+	"os"
 	"sort"
 	"syscall"
 	"unicode/utf16"
@@ -13,18 +14,20 @@ import (
 	"golang.org/x/sys/windows"
 )
 
+// ===================== 常量定义 =====================
+const (
+	snapProcessFlag = 0x00000002
+	maxPathLen      = 260
+	memPrivate      = 0x20000 // MEM_PRIVATE：私有内存类型
+)
+
 // ===================== 系统API声明 =====================
 var (
 	kernel32 = windows.NewLazySystemDLL("kernel32.dll")
 
-	createProcessSnapProc = kernel32.NewProc("CreateToolhelp32Snapshot")
-	processFirstProc      = kernel32.NewProc("Process32FirstW")
-	processNextProc       = kernel32.NewProc("Process32NextW")
-)
-
-const (
-	snapProcessFlag = 0x00000002
-	maxPathLen      = 260
+	procCreateToolhelp32Snapshot = kernel32.NewProc("CreateToolhelp32Snapshot")
+	procProcess32FirstW          = kernel32.NewProc("Process32FirstW")
+	procProcess32NextW           = kernel32.NewProc("Process32NextW")
 )
 
 // processSnapEntry 进程快照信息结构体
@@ -58,7 +61,7 @@ type MemMatch struct {
 
 // ===================== 工具函数 =====================
 
-// stringToUTF16LEBytes 字符串转UTF-16小端字节数组，兼容中文检索
+// stringToUTF16LEBytes 字符串转UTF-16小端字节数组
 func stringToUTF16LEBytes(s string) []byte {
 	u16 := utf16.Encode([]rune(s))
 	b := make([]byte, len(u16)*2)
@@ -75,6 +78,9 @@ func bytesIndex(haystack, needle []byte) int {
 		return 0
 	}
 	maxOffset := len(haystack) - n
+	if maxOffset < 0 {
+		return -1
+	}
 	for i := 0; i <= maxOffset; i++ {
 		if haystack[i] == needle[0] {
 			match := true
@@ -94,7 +100,7 @@ func bytesIndex(haystack, needle []byte) int {
 
 // ===================== 核心扫描函数 =====================
 
-// GetMemMatchStream 按PID从小到大顺序检索全进程内存，找到匹配即推送结果
+// GetMemMatchStream 检索全进程私有内存，匹配指定字符串
 func GetMemMatchStream(ctx context.Context, keyword string) <-chan MemMatch {
 	outCh := make(chan MemMatch, 10)
 	go func() {
@@ -103,11 +109,12 @@ func GetMemMatchStream(ctx context.Context, keyword string) <-chan MemMatch {
 			return
 		}
 
+		selfPid := uint32(os.Getpid())
 		utf8Key := []byte(keyword)
 		utf16Key := stringToUTF16LEBytes(keyword)
 
-		// 1. 创建进程快照，收集所有进程信息
-		snap, _, _ := createProcessSnapProc.Call(snapProcessFlag, 0)
+		// 创建进程快照
+		snap, _, _ := procCreateToolhelp32Snapshot.Call(snapProcessFlag, 0)
 		if snap == ^uintptr(0) {
 			return
 		}
@@ -119,33 +126,31 @@ func GetMemMatchStream(ctx context.Context, keyword string) <-chan MemMatch {
 		pe.size = uint32(unsafe.Sizeof(pe))
 		var procList []procItem
 
-		// 遍历首个进程
-		ret, _, _ := processFirstProc.Call(snap, uintptr(unsafe.Pointer(&pe)))
+		// 遍历进程
+		ret, _, _ := procProcess32FirstW.Call(snap, uintptr(unsafe.Pointer(&pe)))
 		if ret != 0 {
 			for {
 				pid := pe.processID
-				// 跳过系统空闲进程
-				if pid != 0 && pid != 4 {
+				if pid != 0 && pid != 4 && pid != selfPid {
 					procName := windows.UTF16ToString(pe.exeFile[:])
 					procList = append(procList, procItem{
 						pid:  pid,
 						name: procName,
 					})
 				}
-				// 取下一个进程
-				ret, _, _ = processNextProc.Call(snap, uintptr(unsafe.Pointer(&pe)))
+				ret, _, _ = procProcess32NextW.Call(snap, uintptr(unsafe.Pointer(&pe)))
 				if ret == 0 {
 					break
 				}
 			}
 		}
 
-		// 2. 按PID从小到大排序
+		// 按PID排序
 		sort.Slice(procList, func(i, j int) bool {
 			return procList[i].pid < procList[j].pid
 		})
 
-		// 3. 按排序后的顺序逐个扫描进程内存
+		// 逐个扫描进程
 		for _, proc := range procList {
 			select {
 			case <-ctx.Done():
@@ -161,14 +166,14 @@ func GetMemMatchStream(ctx context.Context, keyword string) <-chan MemMatch {
 				continue
 			}
 
-			_ = scanSingleProcess(hProc, proc.pid, proc.name, keyword, utf8Key, utf16Key, outCh, ctx)
+			scanSingleProcess(hProc, proc.pid, proc.name, keyword, utf8Key, utf16Key, outCh, ctx)
 			_ = windows.CloseHandle(hProc)
 		}
 	}()
 	return outCh
 }
 
-// scanSingleProcess 扫描单个进程的所有可读内存页
+// scanSingleProcess 扫描单个进程的私有内存页
 func scanSingleProcess(
 	hProc windows.Handle,
 	pid uint32,
@@ -177,25 +182,26 @@ func scanSingleProcess(
 	utf8Key, utf16Key []byte,
 	outCh chan<- MemMatch,
 	ctx context.Context,
-) bool {
-	var addr uintptr = 0
+) {
+	var addr uintptr
 	var mbi windows.MemoryBasicInformation
+	mbiSize := unsafe.Sizeof(mbi)
 
 	for {
 		select {
 		case <-ctx.Done():
-			return false
+			return
 		default:
 		}
 
-		// 查询内存页信息
-		queryErr := windows.VirtualQueryEx(hProc, addr, &mbi, uintptr(unsafe.Sizeof(mbi)))
+		// 修复1：VirtualQueryEx 只返回 error，不返回字节数
+		queryErr := windows.VirtualQueryEx(hProc, addr, &mbi, uintptr(mbiSize))
 		if queryErr != nil {
 			break
 		}
 
-		// 只扫描已提交内存
-		if mbi.State != windows.MEM_COMMIT {
+		// 修复2：使用自定义 memPrivate 常量，只扫描已提交的私有内存
+		if mbi.State != windows.MEM_COMMIT || mbi.Type != memPrivate {
 			addr = mbi.BaseAddress + mbi.RegionSize
 			continue
 		}
@@ -206,41 +212,57 @@ func scanSingleProcess(
 			continue
 		}
 
-		// 读取内存内容
+		// 读取内存
 		buf := make([]byte, mbi.RegionSize)
 		var readBytes uintptr
 		readErr := windows.ReadProcessMemory(hProc, mbi.BaseAddress, &buf[0], mbi.RegionSize, &readBytes)
-		if readErr != nil || readBytes == 0 {
+		if readErr != nil || readBytes < uintptr(len(utf8Key)) {
 			addr = mbi.BaseAddress + mbi.RegionSize
 			continue
 		}
 		buf = buf[:readBytes]
 
-		// UTF-8 匹配
+		// UTF-8 匹配 + 二次校验
 		if idx := bytesIndex(buf, utf8Key); idx != -1 {
-			outCh <- MemMatch{
-				Pid:         pid,
-				ProcessName: procName,
-				MatchString: keyword,
-				Address:     mbi.BaseAddress + uintptr(idx),
-				MatchType:   "UTF-8",
+			matchAddr := mbi.BaseAddress + uintptr(idx)
+			if verifyMatch(hProc, matchAddr, utf8Key) {
+				outCh <- MemMatch{
+					Pid:         pid,
+					ProcessName: procName,
+					MatchString: keyword,
+					Address:     matchAddr,
+					MatchType:   "UTF-8",
+				}
+				return
 			}
-			return true
 		}
 
-		// UTF-16 匹配（中文、系统字符串）
+		// UTF-16 匹配 + 二次校验
 		if idx := bytesIndex(buf, utf16Key); idx != -1 {
-			outCh <- MemMatch{
-				Pid:         pid,
-				ProcessName: procName,
-				MatchString: keyword,
-				Address:     mbi.BaseAddress + uintptr(idx),
-				MatchType:   "UTF-16",
+			matchAddr := mbi.BaseAddress + uintptr(idx)
+			if verifyMatch(hProc, matchAddr, utf16Key) {
+				outCh <- MemMatch{
+					Pid:         pid,
+					ProcessName: procName,
+					MatchString: keyword,
+					Address:     matchAddr,
+					MatchType:   "UTF-16",
+				}
+				return
 			}
-			return true
 		}
 
 		addr = mbi.BaseAddress + mbi.RegionSize
 	}
-	return false
+}
+
+// verifyMatch 二次校验匹配地址，排除读取异常导致的假阳性
+func verifyMatch(hProc windows.Handle, addr uintptr, needle []byte) bool {
+	buf := make([]byte, len(needle))
+	var readBytes uintptr
+	err := windows.ReadProcessMemory(hProc, addr, &buf[0], uintptr(len(needle)), &readBytes)
+	if err != nil || readBytes != uintptr(len(needle)) {
+		return false
+	}
+	return bytesIndex(buf, needle) == 0
 }
